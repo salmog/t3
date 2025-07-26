@@ -1,0 +1,94 @@
+//@version=5 - 2
+strategy("EMA Sell & Delayed Buy Strategy (With Time Filter + Dual SL)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === Trading Session & Stop Loss Configuration ===
+enableTimeFilter   = input.bool(true, "Enable Time Window?")
+startHour1         = input.int(7, title="Start Hour 1 (NY time)", minval=0, maxval=23)
+startMin1          = input.int(30, title="Start Min 1", minval=0, maxval=59)
+endHour1           = input.int(15, title="End Hour 1 (NY time)", minval=0, maxval=23)
+endMin1            = input.int(30, title="End Min 1", minval=0, maxval=59)
+
+startHour2         = input.int(0, title="Start Hour 2 (NY time, set 0 to disable)", minval=0, maxval=23)
+startMin2          = input.int(0, title="Start Min 2", minval=0, maxval=59)
+endHour2           = input.int(0, title="End Hour 2", minval=0, maxval=23)
+endMin2            = input.int(0, title="End Min 2", minval=0, maxval=59)
+
+stopLossDollars    = input.float(0.0, minval=0.0, title="Stop Loss ($)", step=0.01)
+stopLossPercent    = input.float(1.1, minval=0.0, maxval=100.0, title="Stop Loss (%)", step=0.01)
+
+// === Strategy Parameters ===
+emaLen       = input.int(12, minval=1, title="EMA Length")
+buyDelayBars = input.int(3, minval=1, title="Buy Delay After Sell")
+
+// === Time Filter Logic ===
+nyOffset     = -4  // Adjust manually for DST: -4 for summer, -5 for winter if needed
+nyHour       = (hour + nyOffset + 24) % 24
+nyMinute     = minute
+currentHM    = nyHour * 100 + nyMinute
+
+startHM1     = startHour1 * 100 + startMin1
+endHM1       = endHour1 * 100 + endMin1
+
+// Session 2 only active if startHour2 and endHour2 > 0
+enableSession2 = startHour2 > 0 and endHour2 > 0
+startHM2 = startHour2 * 100 + startMin2
+endHM2   = endHour2 * 100 + endMin2
+
+inSession1 = currentHM >= startHM1 and currentHM < endHM1
+inSession2 = enableSession2 and currentHM >= startHM2 and currentHM < endHM2
+inTradingSession = not enableTimeFilter or (inSession1 or inSession2)
+
+// === EMA Calculation ===
+ema = ta.ema(close, emaLen)
+
+// === State Tracking ===
+var int lastSellBar = na
+var bool aboveSinceLastSell = true
+var bool inPosition = false
+var bool initialBuyDone = false
+
+// === Detect Conditions ===
+closeAboveEMA = close > ema
+closeBelowEMA = close < ema
+
+// === Allow sell only after an above-EMA candle
+if closeAboveEMA
+    aboveSinceLastSell := true
+
+// === Initial Entry Logic ===
+initialBuy = not initialBuyDone and closeAboveEMA and inTradingSession
+if initialBuy
+    strategy.entry("Long", strategy.long)
+    inPosition := true
+    initialBuyDone := true
+
+// === Sell Logic ===
+sellSignal = closeBelowEMA and aboveSinceLastSell and inPosition and inTradingSession
+if sellSignal
+    strategy.close("Long")
+    lastSellBar := bar_index
+    aboveSinceLastSell := false
+    inPosition := false
+
+// === Buy-after-delay Logic ===
+buySignal = not inPosition and not na(lastSellBar) and (bar_index - lastSellBar >= buyDelayBars) and inTradingSession
+if buySignal
+    strategy.entry("Long", strategy.long)
+    inPosition := true
+
+// === Stop Loss Logic ===
+float slLevel = na
+if inPosition
+    if stopLossPercent > 0
+        slLevel := close * (1 - stopLossPercent / 100)
+    else if stopLossDollars > 0
+        slLevel := close - stopLossDollars
+
+    if not na(slLevel)
+        strategy.exit("SL Exit", from_entry="Long", stop=slLevel)
+
+// === Plotting ===
+plot(ema, title="EMA", color=color.orange)
+plotshape(sellSignal, title="Sell", location=location.abovebar, style=shape.labeldown, color=color.red, text="SELL")
+plotshape(buySignal,  title="Buy",  location=location.belowbar, style=shape.labelup,   color=color.green, text="BUY")
+bgcolor(inTradingSession ? color.new(color.green, 92) : na)
